@@ -1,0 +1,29 @@
+{
+  "name": "vela",
+  "version": "1.0.0",
+  "module": "src/main.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/main.tsx",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "bun scripts/build.ts",
+    "icon": "bun scripts/make-icon.ts",
+    "dist": "bun scripts/build.ts && tarve package dist/Vela.exe --format zip --out dist"
+  },
+  "tarve": {
+    "name": "Vela",
+    "description": "Nginx + PHP + MariaDB + Redis stack manager for Windows",
+    "appId": "Vela.Stack",
+    "icon": "assets/icon.png"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@tarve/core": "^0.9.0"
+  }
+}
