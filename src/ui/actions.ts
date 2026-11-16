@@ -6,15 +6,19 @@ import { applyTemplate, dbNameFor, setupLog } from "../core/templates";
 import { caTrusted, ensureSiteCert, trustCa } from "../core/certs";
 import { syncHosts } from "../core/hosts";
 import { autostartEnabled, canAutostart, setAutostart } from "../core/autostart";
-import { ensureAdminer } from "../core/adminer";
+import { ensurePhpMyAdmin, pmaDir, pmaInstalling, pmaSite } from "../core/phpmyadmin";
+import { brokenPhpExtensions, phpExtensions, setPhpExtensions } from "../core/php";
 import { spawn } from "node:child_process";
-import { installVersion } from "../core/installer";
-import { isValidPort, saveConfig, SITE_NAME, type SiteConfig } from "../core/config";
-import { basename } from "node:path";
+import { installVersion, isInstalled } from "../core/installer";
+import { binDir, isValidPort, saveConfig, SITE_NAME, type SiteConfig } from "../core/config";
+import { basename, join } from "node:path";
+import { existsSync } from "node:fs";
 import { levelOf, listLogs, readLogTail } from "../core/logs";
 import type { ServiceName } from "../core/manifest";
 import { anyBusy, anyRunning, ask, errText, findStatus, localUrl, scanInstalled, SERVICE_META, type Tab, toast, ui, update } from "./store";
 import { applyDark, systemPrefersDark, type ThemeMode, fmtUptime } from "./theme";
+import { RUNTIME } from "../core/runtime";
+import { spawnHidden } from "../core/winspawn";
 
 let lastRefreshKey = "";
 
@@ -244,7 +248,39 @@ function portConflict(parsed: Record<ServiceName, number>): string | null {
 export function openServiceSettings(name: ServiceName) {
   const s = ui.cfg.services[name];
   ui.svcEdit = { name, version: s.version, port: String(s.port), enabled: s.enabled, dbPass: "", dbPass2: "", showPass: false };
+  loadPhpExtensions();
   update();
+}
+
+/** Fill the PHP extensions draft for the version picked in the settings modal. */
+export function loadPhpExtensions() {
+  const e = ui.svcEdit;
+  if (!e || e.name !== "php") return;
+  e.extsFor = e.version;
+  e.exts = e.extsBase = undefined;
+  e.zend = [];
+  if (!isInstalled(ui.cfg.root, "php", e.version)) return;
+  try {
+    const list = phpExtensions(binDir(ui.cfg.root, "php", e.version));
+    e.extsBase = Object.fromEntries(list.map((x) => [x.name, x.enabled]));
+    e.exts = { ...e.extsBase };
+    e.zend = list.filter((x) => x.zend).map((x) => x.name);
+  } catch (err) {
+    toast("Couldn't read php.ini", errText(err), "destructive");
+  }
+}
+
+const extChanges = (e: NonNullable<typeof ui.svcEdit>) =>
+  e.exts && e.extsBase ? Object.fromEntries(Object.entries(e.exts).filter(([k, v]) => e.extsBase![k] !== v)) : {};
+export const phpExtsChanged = () => !!ui.svcEdit && Object.keys(extChanges(ui.svcEdit)).length > 0;
+
+/** Write the extension changes; warns about DLLs PHP then can't load (missing dependencies). */
+async function applyPhpExtensions(version: string, changes: Record<string, boolean>): Promise<void> {
+  const dir = binDir(ui.cfg.root, "php", version);
+  setPhpExtensions(dir, changes);
+  const on = Object.keys(changes).filter((k) => changes[k]);
+  const broken = (await brokenPhpExtensions(dir).catch(() => [])).filter((x) => on.includes(x) || x in changes);
+  if (broken.length) toast("PHP couldn't load some extensions", `${broken.join(", ")}: missing DLL dependencies. They stay enabled in php.ini; turn them off if not needed.`, "destructive");
 }
 
 export function saveServiceSettings() {
@@ -275,6 +311,9 @@ export function saveServiceSettings() {
   const cur = ui.cfg.services[name];
   const changed = cur.version !== e.version || cur.port !== port;
   const wasRunning = findStatus(name).status === "running";
+  const exts = name === "php" && e.extsFor ? extChanges(e) : {};
+  const extsVersion = e.extsFor ?? e.version;
+  const nExts = Object.keys(exts).length;
   const apply = () => {
     cur.version = e.version;
     cur.port = port;
@@ -283,6 +322,20 @@ export function saveServiceSettings() {
     saveConfig(ui.cfg);
   };
   ui.svcEdit = null;
+  if (nExts > 0 && !(changed && wasRunning)) {
+    // a restart (below) already picks the new php.ini up; otherwise restart PHP when the edited
+    // version is one that serves requests (the default pool or a site's)
+    apply();
+    const live = wasRunning && phpPools(ui.cfg).some((p) => p.version === extsVersion);
+    return withBusy("php", async () => {
+      await applyPhpExtensions(extsVersion, exts);
+      if (live) {
+        const res = await restartService(ui.cfg, "php");
+        if (res.status !== "running") return toast("PHP did not start", res.message, "destructive");
+      }
+      toast(`PHP ${extsVersion}: ${nExts} extension${nExts === 1 ? "" : "s"} changed`, live ? "PHP restarted." : "Applied on the next start.", "success");
+    });
+  }
   const title = SERVICE_META[name].title;
   const needsInstall = !ui.installed[name].includes(e.version);
   if (!changed || !wasRunning) {
@@ -293,6 +346,7 @@ export function saveServiceSettings() {
   // stop with the old version/port, then start with the new ones
   return withBusy(name, async () => {
     await stopService(name, ui.cfg);
+    if (nExts > 0) await applyPhpExtensions(extsVersion, exts);
     apply();
     if (needsInstall) return toast(`${title} ${e.version} isn't installed`, "Install it to start with the new version.", "destructive", { label: "Install", onClick: () => void onInstall(name) });
     const res = await startService(ui.cfg, name);
@@ -548,7 +602,8 @@ export function openSiteTerminal(name: string) {
   if (!s) return;
   const run = (cmd: string, args: string[]) =>
     new Promise<boolean>((done) => {
-      const p = spawn(cmd, args, { cwd: s.path, detached: true, stdio: "ignore" });
+      // txiki.js: tjs.spawn detaches without a console, so PowerShell would have no window
+      const p: { once(e: string, l: () => void): unknown; unref(): unknown } = RUNTIME === "txiki" ? spawnHidden(cmd, args, { cwd: s.path, detached: true, newConsole: true }) : spawn(cmd, args, { cwd: s.path, detached: true, stdio: "ignore" });
       p.once("error", () => done(false));
       p.once("spawn", () => {
         p.unref();
@@ -679,7 +734,7 @@ export function registerHotkeys() {
 }
 
 // ---------------------------------------------------------------------------
-// Windows sign-in, Adminer
+// Windows sign-in, phpMyAdmin
 // ---------------------------------------------------------------------------
 
 export async function loadAutostart() {
@@ -697,21 +752,23 @@ export async function toggleAutostart(on: boolean) {
   update();
 }
 
-/** Install Adminer as the "adminer" site if needed, then open it (Nginx and PHP must be up). */
-export async function openAdminer() {
+/** Install phpMyAdmin as a site if needed, then open it (Nginx and PHP must be up). */
+export async function openPhpMyAdmin() {
+  if (pmaInstalling()) return toast("phpMyAdmin is still downloading", "It opens when the download finishes.");
+  if (!pmaSite(ui.cfg) || !existsSync(join(pmaDir(ui.cfg), "index.php"))) toast("Installing phpMyAdmin…", "Downloading from phpmyadmin.net");
   try {
-    const site = await ensureAdminer(ui.cfg);
+    const site = await ensurePhpMyAdmin(ui.cfg);
     saveConfig(ui.cfg);
     await applySites();
     const missing = (["nginx", "php"] as const).filter((s) => findStatus(s).status !== "running");
     if (missing.length) {
-      return toast("Adminer is ready", `Start ${missing.map((s) => SERVICE_META[s].title).join(" and ")} to open it.`, "default", {
+      return toast("phpMyAdmin is ready", `Start ${missing.map((s) => SERVICE_META[s].title).join(" and ")} to open it.`, "default", {
         label: "Start",
         onClick: () => void Promise.all(missing.map((s) => onToggleRun(s))).then(() => openSite(site.name)),
       });
     }
     openSite(site.name);
   } catch (err) {
-    toast("Adminer not installed", errText(err), "destructive");
+    toast("phpMyAdmin not installed", errText(err), "destructive");
   }
 }

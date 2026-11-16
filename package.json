@@ -8,7 +8,11 @@
     "start": "bun src/main.tsx",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "bun scripts/build.ts",
+    "build:node": "bun scripts/build.ts --runtime node",
+    "build:txiki": "bun scripts/build.ts --runtime txiki",
     "icon": "bun scripts/make-icon.ts",
+    "check:runtime": "bun scripts/runtime-check.ts && tarve run scripts/runtime-check.ts --runtime node",
+    "e2e": "bun scripts/e2e.ts",
     "dist": "bun scripts/build.ts && tarve package dist/Vela.exe --format zip --out dist"
   },
   "tarve": {

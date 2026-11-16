@@ -4,8 +4,8 @@ import { exec, sysTool } from "./proc";
 const KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const NAME = "Vela";
 
-/** Only the packaged exe can be registered (in dev, execPath is bun.exe). */
-export const canAutostart = () => !/[\\/]bun(\.exe)?$/i.test(process.execPath);
+/** Only the packaged exe can be registered (in dev, execPath is bun.exe / node.exe / tjs.exe). */
+export const canAutostart = () => !/[\\/](bun|node|tjs)(\.exe)?$/i.test(process.execPath);
 
 export async function autostartEnabled(): Promise<boolean> {
   const r = await exec([sysTool("reg.exe"), "query", KEY, "/v", NAME], { timeoutMs: 5000 });

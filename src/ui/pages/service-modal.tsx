@@ -1,5 +1,5 @@
 /** Per-service settings modal (version, port, auto-start, MariaDB password, files). */
-import { Button, Column, Input, Modal, openExternal, Row, Scroll, Text, View } from "@tarve/core";
+import { Button, Column, Input, Modal, openExternal, Pressable, Row, Scroll, Text, View } from "@tarve/core";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { binDir, isValidPort, logsDir } from "../../core/config";
@@ -7,7 +7,7 @@ import { configFileOf, mariaDbInitialized, PHP_WORKERS } from "../../core/servic
 import { MANIFEST } from "../../core/manifest";
 import { findStatus, SERVICE_META, ui, update } from "../store";
 import { Glyph, IconButton, StatusPill, SwitchControl } from "../components";
-import { saveServiceSettings } from "../actions";
+import { loadPhpExtensions, phpExtsChanged, saveServiceSettings } from "../actions";
 import { Select } from "../select";
 import { SERVICE_COLOR, T } from "../theme";
 
@@ -37,6 +37,56 @@ function FileRow(props: { icon: string; label: string; path: string; missing?: s
   );
 }
 
+/** PHP extensions of the version picked above: one chip per ext/php_*.dll, on = loaded by php.ini. */
+function PhpExtensions() {
+  const e = ui.svcEdit!;
+  if (!e.exts) {
+    return (
+      <>
+        <ModalLabel>EXTENSIONS</ModalLabel>
+        <Text size={11.5} color={T.inkFaint}>Install PHP {e.version} to choose its extensions.</Text>
+      </>
+    );
+  }
+  const exts = e.exts;
+  const q = (e.extQuery ?? "").trim().toLowerCase();
+  const names = Object.keys(exts).filter((n) => !q || n.includes(q));
+  const on = Object.values(exts).filter(Boolean).length;
+  return (
+    <>
+      <Row justify="between" align="center">
+        <ModalLabel>{`EXTENSIONS · ${on} OF ${Object.keys(exts).length} ON`}</ModalLabel>
+        <Input id="m-ext-q" value={e.extQuery ?? ""} placeholder="Filter…" onChange={(v) => { e.extQuery = v; update(); }} style={{ width: 140, height: 28 }} />
+      </Row>
+      <Row gap={6} style={{ wrap: true }}>
+        {names.map((n) => {
+          const active = exts[n]!;
+          const dirty = active !== e.extsBase?.[n];
+          return (
+            <Pressable
+              key={n}
+              onClick={() => { exts[n] = !active; update(); }}
+              style={{
+                padding: { top: 5, bottom: 5, left: 10, right: 10 },
+                radius: 999,
+                borderWidth: 1,
+                borderColor: dirty ? T.accentSoft : active ? T.accent : T.line,
+                background: active ? T.accentBg : T.paperAlt,
+                cursor: "pointer",
+              }}
+            >
+              <Text size={11.5} weight={active ? 600 : 500} color={active ? T.accent : T.inkSoft} style={{ fontFamily: T.mono }}>
+                {(dirty ? "• " : "") + n + (e.zend?.includes(n) ? " (zend)" : "")}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </Row>
+      <Text size={11} color={T.inkFaint}>Saved to {e.version}'s php.ini (extension= lines). PHP restarts when it is running.</Text>
+    </>
+  );
+}
+
 export function ServiceSettingsModal() {
   const e = ui.svcEdit;
   const name = e?.name ?? "nginx";
@@ -46,7 +96,8 @@ export function ServiceSettingsModal() {
   const portN = Number(e?.port);
   const portOk = !!e && isValidPort(portN);
   const changed = !!e && (e.version !== ui.cfg.services[name].version || portN !== ui.cfg.services[name].port);
-  const willRestart = changed && st.status === "running";
+  const extsDirty = name === "php" && phpExtsChanged();
+  const willRestart = (changed || extsDirty) && st.status === "running";
   const notInstalled = !!e && !ui.installed[name].includes(e.version);
   const close = () => { ui.svcEdit = null; update(); };
   const versions = MANIFEST[name].versions.map((v) => ({
@@ -93,7 +144,7 @@ export function ServiceSettingsModal() {
               <Column gap={6}>
                 <Text size={12.5} weight={600}>Version</Text>
                 {/* inline popup: Tarve's portal popup is hidden under the Modal (see src/ui/select.tsx) */}
-                <Select inline id="m-version" value={e.version} options={versions} style={{ width: "100%" }} onValueChange={(v) => { e.version = v; update(); }} />
+                <Select inline id="m-version" value={e.version} options={versions} style={{ width: "100%" }} onValueChange={(v) => { e.version = v; loadPhpExtensions(); update(); }} />
               </Column>
               <Row gap={12} align="end">
                 <Column gap={6} style={{ width: 150 }}>
@@ -118,6 +169,8 @@ export function ServiceSettingsModal() {
                 <SwitchControl checked={e.enabled} onChange={(v) => { e.enabled = v; update(); }} />
               </Row>
             </Column>
+
+            {name === "php" ? <PhpExtensions /> : null}
 
             {name === "mariadb" ? (
               <>

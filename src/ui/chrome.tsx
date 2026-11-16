@@ -3,7 +3,7 @@ import { type Child, Column, Modal, openExternal, Pressable, Row, Spinner, Svg, 
 import { ALL_SERVICES } from "../core/services";
 import { wwwDir } from "../core/config";
 import { GearButton, Glyph, IconButton } from "./components";
-import { SHORTCUTS, goTo, openAdminer, setTheme } from "./actions";
+import { SHORTCUTS, goTo, openPhpMyAdmin, setTheme } from "./actions";
 import { isDark, SAIL, T, type ThemeMode } from "./theme";
 import { localUrl, type Tab, ui, update } from "./store";
 
@@ -48,7 +48,7 @@ export function Sidebar() {
       <Column gap={2}>
         <IconButton dark icon="globe" label="Open localhost" onClick={() => openExternal(localUrl())} />
         <IconButton dark icon="folder" label="www folder" onClick={() => openExternal(wwwDir(ui.cfg.root))} />
-        <IconButton dark icon="database" label="Database (Adminer)" onClick={() => void openAdminer()} />
+        <IconButton dark icon="database" label="phpMyAdmin" onClick={() => void openPhpMyAdmin()} />
         <IconButton dark icon="keyboard" label="Shortcuts" onClick={() => { ui.helpOpen = true; update(); }} />
         <IconButton dark icon={currentTheme().icon} label={`Theme: ${currentTheme().label}`} onClick={cycleTheme} />
       </Column>

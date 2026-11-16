@@ -7,7 +7,10 @@
  * How: Tarve's own Bun.build call (with its native-library plugin) is redirected to write a plain
  * bundle; that bundle is then compiled with the Bun CLI, which has these flags.
  *
- *   bun scripts/build.ts [--outfile dist/Vela.exe] [--no-aot]
+ *   bun scripts/build.ts [--outfile dist/Vela.exe] [--no-aot] [--runtime bun|node|txiki]
+ *
+ * --runtime node|txiki: a plain `tarve build` for that runtime (the Bun flags above don't apply).
+ * The app runs the same on all three (src/core/runtime.ts).
  */
 import { build } from "@tarve/core/build";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -20,6 +23,8 @@ const flag = (name: string) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const aot = !args.includes("--no-aot");
+const runtime = (flag("--runtime") ?? "bun") as "bun" | "node" | "txiki";
+if (!["bun", "node", "txiki"].includes(runtime)) throw new Error(`--runtime: bun, node or txiki (got ${runtime})`);
 const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c);
 
 type BuildConfig = Parameters<typeof Bun.build>[0];
@@ -30,7 +35,7 @@ interface CompileOptions {
 }
 
 const original = Bun.build;
-(Bun as { build: typeof Bun.build }).build = (async (options: BuildConfig) => {
+if (runtime === "bun") (Bun as { build: typeof Bun.build }).build = (async (options: BuildConfig) => {
   const { compile, ...rest } = options as BuildConfig & { compile?: CompileOptions };
   if (!compile) return original(options);
   const outdir = mkdtempSync(join(tmpdir(), "vela-bundle-"));
@@ -77,7 +82,8 @@ const original = Bun.build;
 
 const outfile = await build({
   entrypoint: "src/main.tsx",
-  outfile: flag("--outfile") ?? "dist/Vela.exe",
+  outfile: flag("--outfile") ?? (runtime === "bun" ? "dist/Vela.exe" : `dist/Vela-${runtime}.exe`),
+  runtime,
   // URLs in src/core/manifest.ts make "auto" pick the larger "net/media" native variant; fetch is Bun's.
   nativeFeatures: [],
 });

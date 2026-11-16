@@ -206,12 +206,22 @@ if (r.code !== 0) {
   }
 }
 
+/**
+ * Loopback on IPv4 and IPv6 (several addresses: MariaDB 10.11+). Windows resolves "localhost" to
+ * ::1 first, and a refused connection there is retried for ~2 s before 127.0.0.1 is tried: with
+ * 127.0.0.1 only, every connection to "localhost" (phpMyAdmin's default, most .env files) took 2 s.
+ */
+function mariaDbBind(version: string): string {
+  const [a = 0, b = 0] = version.split(".").map(Number);
+  return a > 10 || (a === 10 && b >= 11) ? "127.0.0.1,::1" : "127.0.0.1";
+}
+
 function writeMyIni(cfg: Config, dir: string): string {
   const datadir = dataDir(cfg.root, "mariadb");
   const ini = `[mysqld]
 datadir=${fwd(datadir)}
 port=${cfg.services.mariadb.port}
-bind-address=127.0.0.1
+bind-address=${mariaDbBind(cfg.services.mariadb.version)}
 character-set-server=utf8mb4
 collation-server=utf8mb4_general_ci
 innodb_buffer_pool_size=256M
@@ -230,6 +240,7 @@ function writeRedisConf(cfg: Config, dir: string): string {
   const conf = `port ${cfg.services.redis.port}
 bind 127.0.0.1
 dir "${fwd(dataDir(cfg.root, "redis"))}"
+logfile "${fwd(runLog(cfg, "redis"))}"
 save 900 1
 save 300 10
 appendonly no
@@ -304,7 +315,8 @@ export async function startService(cfg: Config, service: ServiceName): Promise<S
       case "redis": {
         mkdirSync(dataDir(cfg.root, "redis"), { recursive: true });
         const confPath = writeRedisConf(cfg, dir);
-        spawnDetached("redis", join(dir, "redis-server.exe"), [confPath], {
+        // relative to cwd: the msys2 builds (Redis 6+) read "C:\…" as a path relative to their own root
+        spawnDetached("redis", join(dir, "redis-server.exe"), [confPath.slice(dir.length + 1)], {
           cwd: dir,
           logFile: runLog(cfg, "redis"),
         });

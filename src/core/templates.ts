@@ -2,11 +2,12 @@
  * New-site templates: Vazio, Laravel (Composer) and WordPress, each optionally with its own
  * MariaDB database wired into the project's config.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { binDir, dataDir, logsDir, tmpDir, type Config, type SiteConfig } from "./config";
 import { download, unzip } from "./download";
+import { appendText } from "./runtime";
 import { hasPhpCli, runPhp } from "./php";
 import { createDatabase } from "./services";
 import { detectDocroot, writeBlankSite } from "./sites";
@@ -31,7 +32,7 @@ export async function applyTemplate(cfg: Config, site: SiteConfig, template: Tem
   const log = setupLog(cfg, site.name);
   mkdirSync(logsDir(cfg.root), { recursive: true });
   const note = (m: string) => {
-    appendFileSync(log, `[${new Date().toLocaleTimeString()}] ${m}\n`);
+    appendText(log, `[${new Date().toLocaleTimeString()}] ${m}\n`);
     onStep(m);
   };
   const db = dbNameFor(site.name);
@@ -102,7 +103,7 @@ async function laravel(cfg: Config, site: SiteConfig, db: string | null, note: (
     env: { COMPOSER_HOME: home, COMPOSER_NO_INTERACTION: "1" },
     timeoutMs: 20 * 60_000,
   });
-  appendFileSync(log, r.stdout + r.stderr);
+  appendText(log, r.stdout + r.stderr);
   if (r.code !== 0) {
     mkdirSync(site.path, { recursive: true });
     throw new Error(`Composer failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/).slice(-3).join(" ")}`);
@@ -125,7 +126,7 @@ async function laravel(cfg: Config, site: SiteConfig, db: string | null, note: (
     writeFileSync(envPath, env, "utf8");
     note("php artisan migrate…");
     const m = await runPhp(cfg, ["artisan", "migrate", "--force", "--no-interaction"], { cwd: site.path, timeoutMs: 5 * 60_000 });
-    appendFileSync(log, m.stdout + m.stderr);
+    appendText(log, m.stdout + m.stderr);
     if (m.code !== 0) note("Warning: migrate failed (see the setup log); the project was created.");
   }
 }

@@ -1,4 +1,4 @@
-import { closeSync, openSync, readdirSync, readSync, statSync, truncateSync, unlinkSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { logsDir } from "./config";
 
@@ -54,7 +54,7 @@ export function tailFile(path: string, maxLines = 300, maxBytes = 256 * 1024): s
 export function clearLog(root: string, name: string): boolean {
   if (/[\\/]/.test(name) || name.includes("..")) return false;
   try {
-    truncateSync(join(logsDir(root), name), 0);
+    writeFileSync(join(logsDir(root), name), ""); // O_TRUNC, like truncateSync(…, 0)
     return true;
   } catch {
     return false;

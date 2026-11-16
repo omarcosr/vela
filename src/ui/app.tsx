@@ -1,7 +1,8 @@
 /** Root view and bootstrap: wires the pages, dialogs and the refresh loop. */
 import { AlertDialog, Column, createApp, Row, Toaster, Window, requestSingleInstance } from "@tarve/core";
 import { ALL_SERVICES, stopAllServices } from "../core/services";
-import { APP_ID, APP_NAME } from "../core/config";
+import { APP_ID, APP_NAME, saveConfig } from "../core/config";
+import { dropLegacyAdminer } from "../core/phpmyadmin";
 import { onUnexpectedExit } from "../core/proc";
 import type { ServiceName } from "../core/manifest";
 import { applyTheme, goTo, onCrash, onStartAll, openNewSite, openServiceSettings, openSiteSettings, refresh, registerHotkeys } from "./actions";
@@ -13,7 +14,7 @@ import { ServicesPage } from "./pages/services";
 import { SettingsPage } from "./pages/settings";
 import { SitesPage } from "./pages/sites";
 import { T, windowTheme } from "./theme";
-import { type Tab, ui, update } from "./store";
+import { anyBusy, ask, SERVICE_META, type Tab, toast, ui, update } from "./store";
 import iconPath from "../../assets/icon.png" with { type: "file" };
 
 export function App() {
@@ -23,7 +24,22 @@ export function App() {
       if (!ui.quitting && ui.cfg.closeToTray && ui.cfg.tray && ui.tray) {
         ev.preventDefault();
         ui.handle?.hide();
+        return;
       }
+      if (ui.closeConfirmed) return;
+      ui.quitting = false;
+      // never close with services up: stop them first (or stay open)
+      const up = ui.statuses.filter((s) => s.status === "running" || s.status === "starting");
+      if (up.length === 0 && !anyBusy()) return;
+      ev.preventDefault();
+      ui.handle?.activate();
+      if (anyBusy()) return toast("Vela is busy", "Wait for the current start/stop/install to finish before closing.", "destructive");
+      ask(
+        "Services are running",
+        `${up.map((s) => SERVICE_META[s.service].title).join(", ")} ${up.length === 1 ? "is" : "are"} still running. Stop ${up.length === 1 ? "it" : "them"} and close Vela?`,
+        "Stop and close",
+        () => void stopAndClose(),
+      );
     }}>
       <Column flex={1} align="stretch" style={{ background: T.paper, height: "100%" }}>
         <AppTitleBar />
@@ -54,6 +70,18 @@ export function App() {
   );
 }
 
+/** Stop every service, then close; stays open (with the errors) when one refuses to stop. */
+async function stopAndClose(): Promise<void> {
+  ui.globalBusy = "stop";
+  update();
+  const errors = await stopAllServices(ui.cfg).catch((e) => [e instanceof Error ? e : new Error(String(e))]);
+  ui.globalBusy = null;
+  await refresh();
+  if (errors.length > 0) return toast("Vela stays open", errors.map((e) => e.message).join("\n"), "destructive");
+  ui.closeConfirmed = true;
+  ui.handle?.close();
+}
+
 export function appClosed(): Promise<void> {
   if (!ui.handle) return Promise.resolve();
   return ui.handle.closed;
@@ -77,6 +105,7 @@ await applyTheme();
 const instance = process.env.VELA_CAPTURE ? null : await requestSingleInstance({ id: APP_ID }).catch(() => null);
 if (instance && !instance.primary) process.exit(0);
 onUnexpectedExit(onCrash);
+if (dropLegacyAdminer(ui.cfg)) saveConfig(ui.cfg);
 ui.handle = createApp(App, { renderer: "cpu", rememberWindow: !process.env.VELA_CAPTURE, debug: !!process.env.VELA_CAPTURE, icon: iconPath, appIdentity: { id: APP_ID, name: APP_NAME, icon: iconPath } });
 instance?.onSecondInstance(() => ui.handle?.activate());
 // "Open at sign-in" launches with --minimized: straight to the tray (or the taskbar without one)
@@ -104,6 +133,7 @@ if (process.env.VELA_CAPTURE) {
     try {
       await ui.handle?.capture(out);
     } finally {
+      ui.closeConfirmed = true;
       ui.handle?.close();
     }
   }, 2500);

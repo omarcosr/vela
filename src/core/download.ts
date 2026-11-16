@@ -1,14 +1,13 @@
 /**
  * Dependency-free downloader and zip extractor (no curl.exe / tar.exe):
- * only Bun's fetch and node:zlib, so it works on any Windows the app runs on.
+ * only fetch and DecompressionStream, so it works on any Windows the app runs on, under Bun,
+ * Node.js or txiki.js.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, normalize, sep } from "node:path";
-import { inflateRaw } from "node:zlib";
-import { promisify } from "node:util";
 import { createHash } from "node:crypto";
+import { inflateZipEntry } from "./runtime";
 
-const inflateRawAsync = promisify(inflateRaw);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface DownloadOptions {
@@ -48,38 +47,48 @@ export async function download(url: string, dest: string, opts: DownloadOptions 
         redirect: "follow",
         headers: { "User-Agent": "Vela-stack-manager", ...(have > 0 ? { Range: `bytes=${have}-` } : {}) },
       });
-      if (res.status === 416 && have > 0) {
+      // 416 with "bytes */<size>" = <have>: the partial is the whole file (an earlier attempt
+      // finished downloading but stopped before the rename)
+      const complete = res.status === 416 && have > 0 && Number(/\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "")?.[1]) === have;
+      if (res.status === 416 && have > 0 && !complete) {
         rmSync(part, { force: true }); // our partial is bigger than the file: start over
         throw new Error("Invalid partial file");
       }
-      if (!res.ok || !res.body) {
+      if (complete) {
+        await res.body?.cancel().catch(() => {});
+        opts.onProgress?.(have, have);
+      } else if (!res.ok || !res.body) {
         const err = new Error(`HTTP ${res.status} ${res.statusText}`);
         if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
           lastErr = err;
           break; // 404 etc.: retrying won't help
         }
         throw err;
-      }
-      const resumed = res.status === 206 && have > 0;
-      let received = resumed ? have : 0;
-      const len = Number(res.headers.get("content-length") ?? 0);
-      const total = len > 0 ? len + received : 0;
-      fd = openSync(part, resumed ? "a" : "w");
-      opts.onProgress?.(received, total);
-      let lastReport = 0;
-      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-        kick();
-        writeSync(fd, chunk);
-        received += chunk.byteLength;
-        if (Date.now() - lastReport > 200) {
-          lastReport = Date.now();
-          opts.onProgress?.(received, total);
+      } else {
+        const resumed = res.status === 206 && have > 0;
+        let received = resumed ? have : 0;
+        const len = Number(res.headers.get("content-length") ?? 0);
+        const total = len > 0 ? len + received : 0;
+        fd = openSync(part, resumed ? "a" : "w");
+        opts.onProgress?.(received, total);
+        let lastReport = 0;
+        const reader = res.body.getReader();
+        for (;;) {
+          const { done, value: chunk } = await reader.read();
+          if (done) break;
+          kick();
+          writeSync(fd, chunk);
+          received += chunk.byteLength;
+          if (Date.now() - lastReport > 200) {
+            lastReport = Date.now();
+            opts.onProgress?.(received, total);
+          }
         }
+        closeSync(fd);
+        fd = undefined;
+        if (total && received !== total) throw new Error(`Connection dropped (${received} of ${total} bytes)`);
+        opts.onProgress?.(received, total || received);
       }
-      closeSync(fd);
-      fd = undefined;
-      if (total && received !== total) throw new Error(`Connection dropped (${received} of ${total} bytes)`);
-      opts.onProgress?.(received, total || received);
       if (opts.sha256) {
         const got = createHash("sha256").update(readFileSync(part)).digest("hex");
         if (got.toLowerCase() !== opts.sha256.toLowerCase()) {
@@ -114,7 +123,8 @@ interface ZipEntry {
   offset: number;
 }
 
-function readEntries(buf: Buffer): ZipEntry[] {
+function readEntries(bytes: Uint8Array): ZipEntry[] {
+  const buf = le(bytes);
   // End of central directory: last 22 bytes + up to 64 KB comment
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
@@ -168,12 +178,26 @@ function readEntries(buf: Buffer): ZipEntry[] {
 }
 
 /** Extract a .zip into `destDir`. Entries that would escape `destDir` are rejected. */
+/** The little-endian reads of Buffer, over a DataView (txiki.js's Buffer has no 64-bit ones). */
+function le(b: Uint8Array) {
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return {
+    length: b.length,
+    readUInt16LE: (o: number) => v.getUint16(o, true),
+    readUInt32LE: (o: number) => v.getUint32(o, true),
+    readBigUInt64LE: (o: number) => v.getBigUint64(o, true),
+    toString: (enc: "utf8" | "latin1", s: number, e: number) =>
+      enc === "utf8" ? new TextDecoder().decode(b.subarray(s, e)) : String.fromCharCode(...b.subarray(s, e)),
+  };
+}
+
 export async function unzip(zipPath: string, destDir: string): Promise<number> {
-  const buf = readFileSync(zipPath);
+  const bytes: Uint8Array = readFileSync(zipPath);
+  const buf = le(bytes);
   const root = normalize(destDir + sep);
   mkdirSync(root, { recursive: true });
   let n = 0;
-  for (const ent of readEntries(buf)) {
+  for (const ent of readEntries(bytes)) {
     const target = normalize(join(root, ent.name));
     if (!target.startsWith(root)) throw new Error(`Zip with unsafe path: ${ent.name}`);
     if (ent.name.endsWith("/")) {
@@ -182,16 +206,16 @@ export async function unzip(zipPath: string, destDir: string): Promise<number> {
     }
     if (buf.readUInt32LE(ent.offset) !== 0x04034b50) throw new Error(`Invalid zip at ${ent.name}`);
     const start = ent.offset + 30 + buf.readUInt16LE(ent.offset + 26) + buf.readUInt16LE(ent.offset + 28);
-    const raw = buf.subarray(start, start + ent.compSize);
+    const raw = bytes.subarray(start, start + ent.compSize);
+    if (ent.method !== 0 && ent.method !== 8) throw new Error(`Zip: compression method ${ent.method} not supported (${ent.name})`);
     let data: Uint8Array;
-    if (ent.method === 0) data = raw;
-    else if (ent.method === 8) data = await inflateRawAsync(raw); // zlib thread pool: UI stays responsive
-    else throw new Error(`Zip: compression method ${ent.method} not supported (${ent.name})`);
-    if (data.byteLength !== ent.size || (Bun.hash.crc32(data) >>> 0) !== ent.crc >>> 0) {
-      throw new Error(`Corrupt zip: ${ent.name}`);
+    try {
+      data = await inflateZipEntry(raw, ent.method, ent.crc, ent.size); // a stream: UI stays responsive
+    } catch (err) {
+      throw new Error(`Corrupt zip: ${ent.name} (${err instanceof Error ? err.message : String(err)})`);
     }
     mkdirSync(dirname(target), { recursive: true });
-    await Bun.write(target, data);
+    writeFileSync(target, data);
     n++;
   }
   return n;

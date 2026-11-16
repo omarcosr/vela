@@ -50,12 +50,18 @@ export const ui = {
   confirm: null as { title: string; description: string; actionLabel: string; run: () => void; destructive: boolean } | null,
   helpOpen: false,
   /** Draft of the per-service settings modal; applied on Salvar. */
-  svcEdit: null as { name: ServiceName; version: string; port: string; enabled: boolean; dbPass: string; dbPass2: string; showPass: boolean } | null,
+  svcEdit: null as {
+    name: ServiceName; version: string; port: string; enabled: boolean; dbPass: string; dbPass2: string; showPass: boolean;
+    /** PHP: extensions of `extsFor` (a version) as on disk, and the draft. */
+    extsFor?: string; extsBase?: Record<string, boolean>; exts?: Record<string, boolean>; zend?: string[]; extQuery?: string;
+  } | null,
   /** Draft of the Settings forms. */
   form: { root: "", ports: {} as Record<ServiceName, string>, httpsPort: "" },
 
   /** Close requests hide to the tray unless this is set (tray "Sair"). */
   quitting: false,
+  /** Set once the user agreed to stop the running services (or none run): the window may close. */
+  closeConfirmed: false,
   tray: null as TrayHandle | null,
   trayKey: "",
   handle: null as ReturnType<typeof createApp> | null,
@@ -77,10 +83,12 @@ export function scanInstalled(): Record<ServiceName, string[]> {
   return Object.fromEntries(ALL_SERVICES.map((s) => [s, installedVersions(ui.cfg.root, s)])) as Record<ServiceName, string[]>;
 }
 
+/** Show a toast. The same message again (repeated clicks, refresh loops) replaces the one on screen. */
 export function toast(title: string, description?: string, variant: ToastItem["variant"] = "default", action?: ToastItem["action"]) {
   const id = `${Date.now()}-${Math.random()}`;
   const wrapped = action ? { label: action.label, onClick: () => { ui.toasts = ui.toasts.filter((t) => t.id !== id); action.onClick(); } } : undefined;
-  ui.toasts = [...ui.toasts.slice(-3), { id, title, description, variant, action: wrapped }];
+  const same = (t: ToastItem) => t.title === title && t.description === description && t.variant === variant;
+  ui.toasts = [...ui.toasts.filter((t) => !same(t)).slice(-3), { id, title, description, variant, action: wrapped }];
   setTimeout(() => {
     ui.toasts = ui.toasts.filter((t) => t.id !== id);
     update();

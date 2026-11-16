@@ -48,7 +48,7 @@ export async function syncHosts(domains: string[]): Promise<void> {
   const cur = readHosts();
   if (sameSet(listed(cur), domains)) return;
   const next = withBlock(cur, domains);
-  const staged = join(tmpdir(), `vela-hosts-${process.pid}.txt`);
+  const staged = join(tmpdir(), `vela-hosts-${process.pid ?? Date.now()}.txt`);
   writeFileSync(staged, next, "utf8");
   const q = (p: string) => p.replace(/'/g, "''");
   const inner = `Copy-Item -LiteralPath '${q(staged)}' -Destination '${q(HOSTS)}' -Force`;

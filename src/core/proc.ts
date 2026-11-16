@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { processPath, tcpPortPid } from "./win";
+import { RUNTIME, tcpProbe } from "./runtime";
+import { execHidden, spawnHidden } from "./winspawn";
 
 /** Absolute path of a Windows system tool: never resolved through PATH (missing or hijacked entries). */
 export function sysTool(exe: string): string {
@@ -22,17 +24,46 @@ export async function exec(
   cmd: string[],
   opts: { cwd?: string; env?: Record<string, string | undefined>; stdin?: string; timeoutMs?: number } = {},
 ): Promise<ExecResult> {
-  const p = Bun.spawn(cmd, {
+  // txiki.js's spawn can't hide the console window: CreateProcessW with CREATE_NO_WINDOW instead
+  if (RUNTIME === "txiki") return execHidden(cmd[0]!, cmd.slice(1), { ...opts, env: opts.env ? { ...process.env, ...opts.env } : undefined });
+  const child = spawn(cmd[0]!, cmd.slice(1), {
     cwd: opts.cwd,
     env: opts.env ? { ...process.env, ...opts.env } : undefined,
-    stdin: opts.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: [opts.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     windowsHide: true,
-    timeout: opts.timeoutMs ?? 15000,
   });
-  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-  return { code, stdout, stderr };
+  const collect = (s: NodeJS.ReadableStream | null) =>
+    new Promise<string>((resolve) => {
+      if (!s) return resolve("");
+      const chunks: Uint8Array[] = [];
+      let done = false;
+      const end = () => {
+        if (done) return;
+        done = true;
+        let n = 0;
+        for (const c of chunks) n += c.byteLength;
+        const all = new Uint8Array(n);
+        let o = 0;
+        for (const c of chunks) (all.set(c, o), (o += c.byteLength));
+        resolve(new TextDecoder().decode(all));
+      };
+      s.on("data", (c: Uint8Array | string) => chunks.push(typeof c === "string" ? new TextEncoder().encode(c) : c));
+      s.on("end", end);
+      s.on("close", end);
+      s.on("error", end);
+    });
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code));
+  });
+  const timer = setTimeout(() => child.kill(), opts.timeoutMs ?? 15000);
+  try {
+    if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
+    const [stdout, stderr, code] = await Promise.all([collect(child.stdout), collect(child.stderr), exited]);
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface RunningProcess {
@@ -77,14 +108,13 @@ export function spawnDetached(
   opts: { cwd?: string; logFile: string; env?: Record<string, string> },
 ): RunningProcess {
   mkdirSync(dirname(opts.logFile), { recursive: true });
-  const logFd = openSync(opts.logFile, "a");
-  const child = spawn(exe, args, {
-    cwd: opts.cwd,
-    env: { ...process.env, ...(opts.env ?? {}) },
-    stdio: ["ignore", logFd, logFd],
-    windowsHide: true,
-    detached: false,
-  });
+  const env = { ...process.env, ...(opts.env ?? {}) };
+  // txiki.js: no windowsHide and no fd stdio in tjs.spawn; CreateProcessW writes straight to the log
+  const hidden = RUNTIME === "txiki";
+  const logFd = hidden ? undefined : openSync(opts.logFile, "a");
+  const child = hidden
+    ? (spawnHidden(exe, args, { cwd: opts.cwd, env, logFile: opts.logFile }) as unknown as ChildProcess)
+    : spawn(exe, args, { cwd: opts.cwd, env, stdio: ["ignore", logFd!, logFd!], windowsHide: true, detached: false });
   const rp: RunningProcess = { child, service, startedAt: Date.now(), logFile: opts.logFile };
   running.set(service, rp);
   // a missing/blocked exe emits "error" instead of throwing; unhandled it would crash the app
@@ -96,7 +126,7 @@ export function spawnDetached(
     if (running.get(service) === rp) running.delete(service);
     if (rp.confirmed && !rp.stopping) for (const l of exitListeners) l(service.split("#")[0]!, code);
     try {
-      closeSync(logFd);
+      if (logFd !== undefined) closeSync(logFd);
     } catch {
       /* already closed */
     }
@@ -146,30 +176,8 @@ export function managedNames(service: string): string[] {
 }
 
 /** Check whether a TCP port is accepting connections on 127.0.0.1. */
-export async function portOpen(port: number, host = "127.0.0.1", timeoutMs = 1200): Promise<boolean> {
-  try {
-    const conn = Bun.connect({
-      hostname: host,
-      port,
-      socket: {
-        data() {},
-        error() {},
-        close() {},
-      },
-    });
-    const result = await Promise.race([
-      conn.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-    ]);
-    try {
-      (await conn).end();
-    } catch {
-      /* ignore */
-    }
-    return result;
-  } catch {
-    return false;
-  }
+export function portOpen(port: number, host = "127.0.0.1", timeoutMs = 1200): Promise<boolean> {
+  return tcpProbe(host, port, timeoutMs);
 }
 
 export function fileExistsNonEmpty(p: string): boolean {
